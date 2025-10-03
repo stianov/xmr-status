@@ -22,3 +22,6 @@ To toggle logging, set the `RUST_LOG` environment variable using standard syntax
 ```bash
 RUST_LOG="xmr_status=debug" cargo run
 ```
+
+## Donations
+If you appreciate xmr-status, feel free to donate: `864B3yvJLARVHC9yZAamYV9rr6AvmR52ATYc8T1HfWUsC8YqagAvasUbDCUW6o9nCo9eLeHX6LDxCRDtoYaLtjeg8N3RiG3` (the funds will be distributed to the libraries and ecosystems that xmr-status depend on)
