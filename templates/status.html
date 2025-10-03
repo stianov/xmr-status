@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="/static/status.css">
+</head>
+<body>
+<div class="page">
+    <header>
+        <div class="heading">
+            <h1>{{ title }}</h1>
+            <p class="description-text">{{ description }}</p>
+            <span id="status-badge" class="{{ badge_class }}">{{ badge_label }}</span>
+        </div>
+    <p class="subhead" id="subhead"{% if !show_details %} style="display:none;"{% endif %}>
+            Network: <strong id="stat-nettype">{{ nettype }}</strong> · Daemon: <strong id="stat-daemon-status">{{ daemon_status }}</strong> · Version: <strong id="stat-version">{{ version }}</strong>
+        </p>
+    </header>
+
+    <section class="key-metrics" id="key-metrics"{% if !show_details %} style="display:none;"{% endif %}>
+        <div class="metric-item">
+            <div class="metric-label">Block Height</div>
+            <div class="metric-value" id="stat-height">{{ height }}</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-label">Total Peers</div>
+            <div class="metric-value" id="stat-total-peers">{{ total_connections }}</div>
+        </div>
+    </section>
+
+    <section class="txpool-section" id="txpool-section"{% if !show_details %} style="display:none;"{% endif %}>
+        <article class="card txpool-card">
+            <h2>Latest Mempool Transactions</h2>
+            <p class="txpool-meta">Total transactions in mempool: <span id="txpool-total">0</span> · Total size: <span id="txpool-size">0</span> KB.</p>
+            <div class="txpool-table-wrapper">
+                <div class="txpool-header-row">
+                    <div class="txpool-header-info">
+                        <strong class="fee-unit-label">Fee Unit:</strong>
+                        <button id="fee-unit-toggle" type="button" class="fee-unit-toggle">μXMR</button>
+                        <span id="fee-unit-hint" class="fee-unit-hint">Click to switch to XMR</span>
+                    </div>
+                </div>
+                <table class="txpool-table" style="margin-top:0.5rem">
+                    <thead>
+                        <tr>
+                            <th scope="col">Tx hash</th>
+                            <th scope="col" id="fee-header">Fee (μXMR)</th>
+                            <th scope="col">Size</th>
+                        </tr>
+                    </thead>
+                    <tbody id="txpool-body">
+                        <tr class="txpool-empty"><td colspan="3">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </article>
+    </section>
+
+    <div class="footer"{% if !show_details %} style="display:none;"{% endif %}>
+        Powered by <a href="#">xmr-status</a>
+    </div>
+</div>
+
+<script id="status-json" type="application/json">
+{{ status_json|safe }}
+</script>
+<script id="txpool-json" type="application/json">
+{{ txpool_json|safe }}
+</script>
+<script>
+(() => {
+    const numberFormatter = new Intl.NumberFormat('en-US');
+    const XMR_ATOMIC_UNITS = 1_000_000_000_000;
+
+    const byId = (id) => document.getElementById(id);
+    const els = {
+        badge: byId('status-badge'),
+        nettype: byId('stat-nettype'),
+        daemon: byId('stat-daemon-status'),
+        version: byId('stat-version'),
+        height: byId('stat-height'),
+        totalPeers: byId('stat-total-peers'),
+        subhead: byId('subhead'),
+        keyMetrics: byId('key-metrics'),
+        txpoolSection: byId('txpool-section'),
+        txpoolBody: byId('txpool-body'),
+        txpoolTotal: byId('txpool-total'),
+        txpoolCount: byId('txpool-count'),
+        txpoolSize: byId('txpool-size'),
+        feeToggle: byId('fee-unit-toggle'),
+        feeHeader: byId('fee-header'),
+        feeHint: byId('fee-unit-hint'),
+        footer: document.querySelector('.footer'),
+    };
+
+    const readFeeUnit = () => {
+        try {
+            return localStorage.getItem('feeUnit');
+        } catch (_) {
+            return null;
+        }
+    };
+
+    let feeUnit = readFeeUnit() || 'micronero';
+
+    const parseInitial = (id, fallback) => {
+        const el = document.getElementById(id);
+        if (!el) return fallback;
+        try {
+            const payload = el.textContent || '';
+            return JSON.parse(payload);
+        } catch (err) {
+            console.error(`Failed to parse ${id}`, err);
+            return fallback;
+        }
+    };
+
+    const asNumber = (value, fallback = 0) => {
+        const num = Number(value);
+        return Number.isFinite(num) ? num : fallback;
+    };
+
+    const valueOr = (value, fallback) => (value === undefined || value === null ? fallback : value);
+
+    const formatNumber = (value) => {
+        const num = asNumber(value, NaN);
+        return Number.isNaN(num) ? 'n/a' : numberFormatter.format(num);
+    };
+
+    const formatMicronero = (atomic) => {
+        const value = asNumber(atomic, NaN);
+        if (Number.isNaN(value) || value < 0) return 'n/a';
+        return Math.round(value / 1_000_000).toLocaleString('en-US');
+    };
+
+    const formatXmr = (atomic) => {
+        const value = asNumber(atomic, NaN);
+        if (Number.isNaN(value) || value < 0) return 'n/a';
+        const xmr = value / XMR_ATOMIC_UNITS;
+        if (xmr >= 1) return xmr.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+        if (xmr >= 0.01) return xmr.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
+        return xmr.toFixed(12).replace(/0+$/, '').replace(/\.$/, '');
+    };
+
+    const formatBytes = (bytes) => {
+        const value = asNumber(bytes, NaN);
+        if (Number.isNaN(value) || value < 0) return 'n/a';
+        const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+        let unit = 0;
+        let size = value;
+        while (size >= 1024 && unit < units.length - 1) {
+            size /= 1024;
+            unit += 1;
+        }
+        return unit === 0 ? `${Math.round(size)} ${units[unit]}` : `${size.toFixed(2)} ${units[unit]}`;
+    };
+
+    const setText = (el, value) => {
+        if (el) el.textContent = value;
+    };
+
+    const updateBadge = (status) => {
+        if (!els.badge) return;
+        const offline = Boolean(valueOr(status.offline, false));
+        const synced = Boolean(valueOr(status.synchronized, false));
+        const state = offline
+            ? { className: 'status-badge offline', label: 'Offline' }
+            : synced
+                ? { className: 'status-badge online', label: 'Synced' }
+                : { className: 'status-badge syncing', label: 'Syncing' };
+        els.badge.className = state.className;
+        els.badge.textContent = state.label;
+    };
+
+    const updateLayoutForOfflineState = (isOffline) => {
+        const showDetails = !isOffline;
+        if (els.subhead) {
+            els.subhead.style.display = showDetails ? '' : 'none';
+        }
+        if (els.keyMetrics) {
+            els.keyMetrics.style.display = showDetails ? '' : 'none';
+        }
+        if (els.txpoolSection) {
+            els.txpoolSection.style.display = showDetails ? '' : 'none';
+        }
+        if (els.footer) {
+            els.footer.style.display = showDetails ? '' : 'none';
+        }
+    };
+
+    const updateFeeToggle = () => {
+        if (!els.feeHeader || !els.feeToggle || !els.feeHint) return;
+        const usingMicronero = feeUnit === 'micronero';
+        els.feeHeader.textContent = `Fee (${usingMicronero ? 'μXMR' : 'XMR'})`;
+        els.feeToggle.textContent = usingMicronero ? 'μXMR' : 'XMR';
+        els.feeHint.textContent = `Click to switch to ${usingMicronero ? 'XMR' : 'μXMR'}`;
+    };
+
+    const shortenHash = (hash) => {
+        if (typeof hash !== 'string') return 'unknown';
+        return hash.length > 20 ? `${hash.slice(0, 12)}…${hash.slice(-6)}` : hash;
+    };
+
+    const normaliseTxpool = (snapshot) => {
+        const sourceEntries = snapshot && Array.isArray(snapshot.entries) ? snapshot.entries : [];
+        const entries = sourceEntries.slice();
+        entries.sort((a, b) => asNumber(b && b.receiveTime) - asNumber(a && a.receiveTime));
+        if (entries.length > 10) {
+            entries.length = 10;
+        }
+
+        const totalTransactions = asNumber(snapshot && snapshot.totalTransactions, entries.length);
+        const totalWeightBytes = asNumber(
+            snapshot && snapshot.totalWeightBytes,
+            entries.reduce((sum, entry) => sum + Math.max(0, asNumber(entry && entry.weight)), 0),
+        );
+
+        return { entries, totalTransactions, totalWeightBytes };
+    };
+
+    const renderTxpool = (snapshot) => {
+        const normalised = normaliseTxpool(snapshot);
+        const { entries, totalTransactions, totalWeightBytes } = normalised;
+
+        setText(els.txpoolCount, formatNumber(entries.length));
+        setText(els.txpoolTotal, formatNumber(totalTransactions));
+
+        if (els.txpoolSize) {
+            const kb = totalWeightBytes / 1024;
+            if (Number.isFinite(kb) && kb >= 0) {
+                const formatted = kb >= 100
+                    ? Math.round(kb).toLocaleString('en-US')
+                    : kb.toFixed(1);
+                els.txpoolSize.textContent = formatted;
+            } else {
+                els.txpoolSize.textContent = 'n/a';
+            }
+        }
+
+        if (!els.txpoolBody) {
+            return normalised;
+        }
+
+        els.txpoolBody.innerHTML = '';
+
+        if (!entries.length) {
+            const row = els.txpoolBody.insertRow();
+            row.className = 'txpool-empty';
+            const cell = row.insertCell();
+            cell.colSpan = 3;
+            cell.textContent = 'No transactions in the mempool';
+            return normalised;
+        }
+
+        entries.forEach((tx) => {
+            const row = els.txpoolBody.insertRow();
+            row.classList.add('txpool-row');
+
+            const hash = valueOr(tx && tx.hash, 'unknown');
+            const hashCell = row.insertCell();
+            hashCell.dataset.label = 'Tx hash';
+            const link = document.createElement('a');
+            link.className = 'txpool-hash';
+            link.href = `https://xmrchain.net/tx/${hash}`;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.title = hash;
+            link.textContent = shortenHash(hash);
+            hashCell.appendChild(link);
+
+            const feeCell = row.insertCell();
+            feeCell.dataset.label = `Fee (${feeUnit === 'micronero' ? 'μXMR' : 'XMR'})`;
+            const feeValue = feeUnit === 'micronero'
+                ? formatMicronero(tx && tx.fee)
+                : formatXmr(tx && tx.fee);
+            feeCell.textContent = feeValue;
+
+            const sizeCell = row.insertCell();
+            sizeCell.dataset.label = 'Size';
+            sizeCell.textContent = formatBytes(tx && tx.weight);
+        });
+
+        return normalised;
+    };
+
+    const applyStatus = (status) => {
+        if (!status) return;
+        const isOffline = Boolean(valueOr(status.offline, false));
+        updateLayoutForOfflineState(isOffline);
+
+        if (isOffline) {
+            setText(els.nettype, '');
+            setText(els.daemon, '');
+            setText(els.version, '');
+            setText(els.height, '');
+            setText(els.totalPeers, '');
+            updateBadge(status);
+            return;
+        }
+
+        setText(els.nettype, valueOr(status.nettype, 'unknown'));
+        setText(els.daemon, valueOr(status.statusText, 'Unknown'));
+        setText(els.version, valueOr(status.version, 'unknown'));
+        setText(els.height, formatNumber(status.height));
+        const totalPeers = asNumber(status.incomingConnections) + asNumber(status.outgoingConnections);
+        setText(els.totalPeers, formatNumber(totalPeers));
+        updateBadge(status);
+    };
+
+    const initialStatus = parseInitial('status-json', null);
+    const initialTxpool = parseInitial('txpool-json', { entries: [], totalTransactions: 0, totalWeightBytes: 0 });
+
+    applyStatus(initialStatus);
+    updateFeeToggle();
+    let latestTxpool = renderTxpool(initialTxpool);
+
+    const source = new EventSource('/events');
+    source.addEventListener('status', (event) => {
+        try {
+            applyStatus(JSON.parse(event.data));
+        } catch (err) {
+            console.error('Failed to apply status update', err);
+        }
+    });
+
+    source.addEventListener('txpool', (event) => {
+        try {
+            latestTxpool = renderTxpool(JSON.parse(event.data));
+        } catch (err) {
+            console.error('Failed to apply txpool update', err);
+        }
+    });
+
+    if (els.feeToggle) {
+        els.feeToggle.addEventListener('click', () => {
+            feeUnit = feeUnit === 'micronero' ? 'xmr' : 'micronero';
+            try {
+                localStorage.setItem('feeUnit', feeUnit);
+            } catch (_) {
+                /* ignore */
+            }
+            updateFeeToggle();
+            latestTxpool = renderTxpool(latestTxpool);
+        });
+    }
+})();
+</script>
+</div>
+</body>
+</html>
